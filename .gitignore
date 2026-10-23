@@ -10,3 +10,6 @@ dist/
 build/
 *.egg-info/
 .aws-sam/
+
+# Local backup files
+*.backup
