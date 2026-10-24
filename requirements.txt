@@ -3,3 +3,5 @@ python-dotenv>=1.0,<2
 strands-agents>=1.0,<2
 bedrock-agentcore>=1.0,<2
 pytest>=8,<10
+pymongo>=4.19,<5
+dnspython>=2.7,<3

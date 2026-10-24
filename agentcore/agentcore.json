@@ -1,0 +1,17 @@
+{
+  "name": "NovaMartRAG",
+  "version": 2,
+  "managedBy": "CDK",
+  "runtimes": [
+    {
+      "name": "novamart",
+      "build": "CodeZip",
+      "modelProvider": "Bedrock",
+      "entrypoint": "main.py",
+      "codeLocation": "runtime",
+      "runtimeVersion": "PYTHON_3_12",
+      "protocol": "HTTP"
+    }
+  ],
+  "memories": []
+}

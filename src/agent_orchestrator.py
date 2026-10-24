@@ -21,6 +21,38 @@ from strands import Agent
 from strands.models import BedrockModel
 
 import config
+try:
+    from . import mongodb_store
+    # Package imports used by pytest and `import src.agent_orchestrator`.
+    from .agent_utils import (
+        check_order_status,
+        get_customer_tier,
+        list_customer_orders,
+        get_inventory_context,
+        initiate_refund,
+        get_full_workflow_context,
+    )
+    from .bedrock_kb_retrieval import (
+        retrieve_returns_policy,
+        retrieve_shipping_policy,
+        retrieve_warranty_policy,
+    )
+except ImportError:
+    # Fallback for direct execution: `python src/agent_orchestrator.py`.
+    import mongodb_store
+    from agent_utils import (
+        check_order_status,
+        get_customer_tier,
+        list_customer_orders,
+        get_inventory_context,
+        initiate_refund,
+        get_full_workflow_context,
+    )
+    from bedrock_kb_retrieval import (
+        retrieve_returns_policy,
+        retrieve_shipping_policy,
+        retrieve_warranty_policy,
+    )
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -29,30 +61,31 @@ logging.basicConfig(
 log = logging.getLogger("novamart")
 
 session = boto3.Session(region_name=config.AWS_REGION)
-dynamodb = session.resource("dynamodb")
 bedrock_agent_runtime = session.client("bedrock-agent-runtime")
 bedrock_runtime = session.client("bedrock-runtime")
 
-orders_table = dynamodb.Table(config.ORDERS_TABLE)
-customers_table = dynamodb.Table(config.CUSTOMERS_TABLE)
-workflow_table = dynamodb.Table(config.WORKFLOW_STATE_TABLE)
+def _make_model(model_id: str, temperature: float) -> BedrockModel:
+    """Create a Bedrock model with an explicit sampling temperature."""
+    return BedrockModel(
+        model_id=model_id,
+        region_name=config.AWS_REGION,
+        temperature=temperature,
+    )
 
-model = BedrockModel(
-    model_id=config.BEDROCK_MODEL_ID,
-    region_name=config.AWS_REGION,
-)
 
 inventory_agent = Agent(
-    model=model,
+    model=_make_model(config.WORKER_MODEL_ID, 0.1),
+    tools=[check_order_status, get_customer_tier, list_customer_orders],
     system_prompt=(
-        "You are NovaMart's Inventory Support specialist. Use only the supplied "
-        "order/customer records. Never invent an order, delivery date, or account "
+        "You are NovaMart's Inventory Support specialist. Use the supplied "
+        "records and tools. Never invent an order, delivery date, or account "
         "fact. If data is missing, say what identifier is needed."
     ),
 )
 
 refund_agent = Agent(
-    model=model,
+    model=_make_model(config.WORKER_MODEL_ID, 0.1),
+    tools=[get_inventory_context, initiate_refund],
     system_prompt=(
         "You are NovaMart's Refund specialist. Explain the supplied refund "
         "eligibility decision using only the provided order, customer, and "
@@ -62,16 +95,23 @@ refund_agent = Agent(
 )
 
 policy_agent = Agent(
-    model=model,
+    model=_make_model(config.WORKER_MODEL_ID, 0.0),
+    tools=[
+        retrieve_returns_policy,
+        retrieve_shipping_policy,
+        retrieve_warranty_policy,
+    ],
     system_prompt=(
-        "You are NovaMart's Policy specialist. Answer only from the retrieved "
-        "policy passages supplied in the prompt. Distinguish policy facts from "
-        "unknowns. Cite the relevant source or knowledge base where possible."
+        "You are NovaMart's Policy specialist. Search the relevant policy "
+        "knowledge bases using the provided tools. Answer only from retrieved "
+        "policy passages. Distinguish policy facts from unknowns and cite "
+        "the relevant source where possible."
     ),
 )
 
 communication_agent = Agent(
-    model=model,
+    model=_make_model(config.WORKER_MODEL_ID, 0.3),
+    tools=[get_full_workflow_context],
     system_prompt=(
         "You are NovaMart's customer communication specialist. Write a concise, "
         "professional, empathetic response. Use only facts and decisions provided "
@@ -140,13 +180,11 @@ def route_intent(message: str) -> str:
     return "general"
 
 def lookup_order(order_id: str) -> dict[str, Any] | None:
-    result = orders_table.get_item(Key={"order_id": order_id})
-    return _plain(result.get("Item"))
+    return mongodb_store.get_order(order_id)
 
 
 def lookup_customer(customer_id: str) -> dict[str, Any] | None:
-    result = customers_table.get_item(Key={"customer_id": customer_id})
-    return _plain(result.get("Item"))
+    return mongodb_store.get_customer(customer_id)
 
 
 def get_policy(kb_id: str, query: str, label: str) -> dict[str, Any]:
@@ -222,38 +260,13 @@ def decide_refund(order: dict[str, Any] | None,
 
 def update_workflow(session_id: str, request_text: str, intent: str,
                     outcome: str) -> None:
-    """Persist workflow state with optimistic version checking."""
-    now = datetime.now(timezone.utc).isoformat()
-    for _attempt in range(3):
-        current = workflow_table.get_item(
-            Key={"session_id": session_id}, ConsistentRead=True
-        ).get("Item", {})
-        expected = int(current.get("version", 0))
-        try:
-            workflow_table.update_item(
-                Key={"session_id": session_id},
-                UpdateExpression=(
-                    "SET #v = :newv, updated_at = :ts, last_request = :req, "
-                    "last_intent = :intent, last_outcome = :outcome"
-                ),
-                ConditionExpression="attribute_not_exists(#v) OR #v = :expected",
-                ExpressionAttributeNames={"#v": "version"},
-                ExpressionAttributeValues={
-                    ":newv": expected + 1,
-                    ":expected": expected,
-                    ":ts": now,
-                    ":req": request_text[:2000],
-                    ":intent": intent,
-                    ":outcome": outcome[:4000],
-                },
-            )
-            return
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-                raise
-            log.info("Workflow version conflict; retrying")
-    raise RuntimeError("Could not update workflow after version conflicts.")
-
+    """Persist workflow state in MongoDB."""
+    mongodb_store.update_workflow(
+        session_id=session_id,
+        request_text=request_text,
+        intent=intent,
+        outcome=outcome,
+    )
 
 
 def initialize_session(

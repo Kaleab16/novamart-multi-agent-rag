@@ -13,3 +13,29 @@ build/
 
 # Local backup files
 *.backup
+
+# Local backup files
+*.bak
+*.backup
+*.pre-integration.bak
+
+# AgentCore generated staging files
+agentcore/.cache/
+
+# AWS CDK generated output
+agentcore/cdk/cdk.out/
+agentcore/cdk/dist/
+
+# Node dependencies
+node_modules/
+
+# Local AgentCore state and generated artifacts
+agentcore/.cli/
+*.before-*
+*.zip
+
+# Local credentials and private keys
+.env.*
+!.env.example
+*.pem
+*.key
